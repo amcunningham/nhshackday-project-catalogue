@@ -414,9 +414,143 @@
     .share-bar { flex-direction: column; align-items: stretch; }
   }
 
+  /* Tab navigation */
+  .tab-bar {
+    display: flex;
+    gap: 0;
+    max-width: 960px;
+    margin: 20px auto 0;
+    padding: 0 20px;
+  }
+
+  .tab-btn {
+    padding: 10px 24px;
+    font-size: 0.95rem;
+    font-weight: 700;
+    border: 2px solid #aeb7bd;
+    border-bottom: none;
+    background: var(--nhs-pale-grey);
+    color: var(--nhs-grey);
+    cursor: pointer;
+    border-radius: 8px 8px 0 0;
+    margin-right: -1px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .tab-btn.active {
+    background: white;
+    color: var(--nhs-dark-blue);
+    border-color: var(--nhs-blue);
+    z-index: 2;
+  }
+
+  .tab-btn:hover:not(.active) {
+    background: #dde5e8;
+  }
+
+  .tab-content {
+    display: none;
+  }
+
+  .tab-content.active {
+    display: block;
+  }
+
+  .tab-divider {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 0 20px;
+    border-top: 2px solid var(--nhs-blue);
+  }
+
+  /* Schedule data reference tables */
+  #schedule-data-tab {
+    max-width: 960px;
+    margin: 0 auto 40px;
+    padding: 0 20px;
+  }
+
+  .sched-section {
+    background: white;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+
+  .sched-section h3 {
+    font-size: 1.1rem;
+    color: var(--nhs-dark-blue);
+    margin-bottom: 12px;
+    padding-bottom: 6px;
+    border-bottom: 2px solid var(--nhs-pale-grey);
+  }
+
+  .sched-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+
+  .sched-table th {
+    text-align: left;
+    padding: 8px 10px;
+    background: var(--nhs-pale-grey);
+    color: var(--nhs-dark-blue);
+    font-weight: 700;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border-bottom: 2px solid #ccd3d8;
+  }
+
+  .sched-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #e8edee;
+    vertical-align: top;
+  }
+
+  .sched-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .sched-table .date-cell {
+    white-space: nowrap;
+    color: var(--nhs-dark-blue);
+    font-weight: 600;
+    min-width: 100px;
+  }
+
+  .sched-table .note-cell {
+    font-size: 0.82rem;
+    color: #4c6272;
+    font-style: italic;
+  }
+
+  .sched-intro {
+    font-size: 0.9rem;
+    color: #4c6272;
+    margin-bottom: 16px;
+    line-height: 1.6;
+  }
+
+  .source-link {
+    font-size: 0.82rem;
+    color: var(--nhs-bright-blue);
+  }
+
+  @media (max-width: 600px) {
+    .sched-table { font-size: 0.8rem; }
+    .sched-table th, .sched-table td { padding: 6px 6px; }
+    .tab-btn { padding: 8px 14px; font-size: 0.85rem; }
+  }
+
   @media print {
     header { box-shadow: none; }
-    .input-section, .disclaimer, .share-bar, footer { display: none; }
+    .input-section, .disclaimer, .share-bar, footer, .tab-bar, .tab-divider { display: none; }
+    .tab-content { display: block !important; }
+    #schedule-data-tab { display: none !important; }
     .vaccine-group.past .vaccine-card { border-left-color: #333 !important; }
     .vaccine-group.future .vaccine-card { border-left-color: #999 !important; }
     body { background: white; }
@@ -469,7 +603,18 @@
   </div>
 </div>
 
-<div id="results"></div>
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('checker')" id="tab-checker">Check My Vaccines</button>
+  <button class="tab-btn" onclick="switchTab('schedule')" id="tab-schedule">Schedule Data</button>
+</div>
+<div class="tab-divider"></div>
+
+<div id="checker-tab" class="tab-content active">
+  <div id="results"></div>
+</div>
+
+<div id="schedule-data-tab" class="tab-content"></div>
+
 <div class="toast" id="toast"></div>
 
 <footer>
@@ -1369,6 +1514,190 @@ function downloadText() {
   URL.revokeObjectURL(a.href);
   showToast('Schedule downloaded');
 }
+
+// ============================================================
+// SECTION 5: SCHEDULE DATA TAB
+// ============================================================
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+  if (tab === 'schedule') {
+    document.getElementById('tab-schedule').classList.add('active');
+    document.getElementById('schedule-data-tab').classList.add('active');
+    // Render on first view
+    if (!document.getElementById('schedule-data-tab').dataset.loaded) {
+      renderScheduleData();
+      document.getElementById('schedule-data-tab').dataset.loaded = '1';
+    }
+  } else {
+    document.getElementById('tab-checker').classList.add('active');
+    document.getElementById('checker-tab').classList.add('active');
+  }
+}
+
+function fmtDateArr(arr) {
+  if (!arr) return '—';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const y = arr[0], m = arr[1], day = arr[2] || 1;
+  return `${day > 1 ? day + ' ' : ''}${months[m - 1]} ${y}`;
+}
+
+function renderScheduleData() {
+  const DATA = SCHEDULE_DATA;
+  let html = '';
+
+  html += '<div class="sched-intro" style="margin-top:16px;">';
+  html += '<strong>Schedule reference data</strong> — This is the raw eligibility data the tool uses, shown here so clinicians and colleagues can cross-check it against ';
+  html += '<a href="https://www.gov.uk/government/publications/vaccination-timeline" target="_blank">the UKHSA Vaccination Timeline</a> and ';
+  html += '<a href="https://www.gov.uk/government/collections/immunisation" target="_blank">the Green Book</a>. ';
+  html += 'Dates shown as "Birth from / to" mean the vaccine was offered to people born in that range. ';
+  html += '"Admin from / to" means the vaccine product was in use during that period regardless of birth date.';
+  html += '</div>';
+
+  // --- Infant combo ---
+  html += '<div class="sched-section"><h3>Infant primary course (3 doses)</h3>';
+  html += `<p style="font-size:0.85rem;color:#4c6272;margin-bottom:8px;">Accelerated schedule (2/3/4 months) introduced: <strong>${fmtDateArr(DATA.acceleratedScheduleFrom)}</strong>. Before this: 3/5/9–11 months.</p>`;
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  for (const v of DATA.infantCombo) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.birthFrom)}</td><td class="date-cell">${fmtDateArr(v.birthTo)}</td><td>${v.detail}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- Infant additional ---
+  html += '<div class="sched-section"><h3>Additional infant vaccines</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Doses at</th><th>Notes</th></tr>';
+  for (const v of DATA.infantAdditional) {
+    let dosesStr = v.doses.map(n => `dose ${n}`).join(', ');
+    let notesStr = '';
+    if (v.variations) {
+      notesStr = v.variations.map(vr =>
+        `From ${fmtDateArr(vr.birthFrom)}: ${vr.doses.map(n => 'dose ' + n).join(', ')}`
+      ).join('; ');
+    }
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.birthFrom)}</td><td class="date-cell">${fmtDateArr(v.birthTo)}</td><td>${dosesStr}</td><td class="note-cell">${notesStr}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- 12 months ---
+  html += '<div class="sched-section"><h3>12-month vaccines</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  for (const v of DATA.twelveMonths) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.birthFrom)}</td><td class="date-cell">${fmtDateArr(v.birthTo)}</td><td>${v.detail}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- 18 months ---
+  const m18 = DATA.eighteenMonths;
+  html += '<div class="sched-section"><h3>18-month booster (new from Jan 2026)</h3>';
+  html += `<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Details</th></tr>`;
+  html += `<tr><td><strong>${m18.name}</strong></td><td class="date-cell">${fmtDateArr(m18.birthFrom)}</td><td>${m18.detail}</td></tr>`;
+  html += '</table></div>';
+
+  // --- Children's flu ---
+  const cf = DATA.childFlu;
+  html += '<div class="sched-section"><h3>Children\'s flu vaccine (annual nasal spray)</h3>';
+  html += '<table class="sched-table"><tr><th>Group</th><th>Born from</th><th>Details</th></tr>';
+  html += `<tr><td><strong>Full programme (age 2–10)</strong></td><td class="date-cell">${fmtDateArr(cf.fullFrom)}</td><td>Annual nasal flu spray offered each autumn</td></tr>`;
+  html += `<tr><td><strong>Partial (primary school)</strong></td><td class="date-cell">${fmtDateArr(cf.partialFrom)}</td><td>Phased rollout from ${fmtDateArr(cf.partialStart)}</td></tr>`;
+  html += '</table></div>';
+
+  // --- Pre-school booster ---
+  html += '<div class="sched-section"><h3>Pre-school booster (3 years 4 months)</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Admin from</th><th>Admin to</th><th>Details</th></tr>';
+  for (const v of DATA.preschoolBooster) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.adminFrom)}</td><td class="date-cell">${fmtDateArr(v.adminTo)}</td><td>${v.detail}</td></tr>`;
+  }
+  html += '</table>';
+  html += '<h3 style="margin-top:16px;">Pre-school MMR / MMRV (dose 2)</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  for (const v of DATA.preschoolMMR) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.birthFrom)}</td><td class="date-cell">${fmtDateArr(v.birthTo)}</td><td>${v.detail}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- Catch-ups ---
+  html += '<div class="sched-section"><h3>Catch-up campaigns</h3>';
+
+  // MR 1994
+  const mr = DATA.catchups.mr1994;
+  html += '<table class="sched-table"><tr><th colspan="4" style="background:var(--nhs-blue);color:white;">MR catch-up — November 1994</th></tr>';
+  html += '<tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  html += `<tr><td><strong>${mr.name}</strong></td><td class="date-cell">${fmtDateArr(mr.birthFrom)}</td><td class="date-cell">${fmtDateArr(mr.birthTo)}</td><td>${mr.detail}<br><span class="note-cell">${mr.note}</span></td></tr>`;
+  html += '</table>';
+
+  // MenC 1999
+  const mc = DATA.catchups.menC1999;
+  html += '<table class="sched-table" style="margin-top:12px;"><tr><th colspan="4" style="background:var(--nhs-blue);color:white;">MenC catch-up — 1999–2001</th></tr>';
+  html += '<tr><th>Vaccine</th><th>Born before</th><th>Details</th><th>Timing by age</th></tr>';
+  html += `<tr><td><strong>${mc.name}</strong></td><td class="date-cell">${fmtDateArr(mc.birthTo)}</td><td>${mc.detail}<br><span class="note-cell">${mc.note}</span></td>`;
+  html += '<td>';
+  for (const band of mc.ageBands) {
+    html += `Age ${band.minAge}+: ${band.label}<br>`;
+  }
+  html += '</td></tr></table>';
+
+  // HPV 2008
+  const hc = DATA.catchups.hpv2008;
+  html += '<table class="sched-table" style="margin-top:12px;"><tr><th colspan="4" style="background:var(--nhs-blue);color:white;">HPV catch-up — 2008–2010 (girls only)</th></tr>';
+  html += '<tr><th>Academic year</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  for (const c of hc.cohorts) {
+    html += `<tr><td><strong>${c.academicYear}/${c.academicYear+1}</strong></td><td class="date-cell">${fmtDateArr(c.birthFrom)}</td><td class="date-cell">${fmtDateArr(c.birthTo)}</td><td>${hc.detail}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- BCG ---
+  const bcg = DATA.bcg;
+  html += '<div class="sched-section"><h3>BCG (schools programme)</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born before</th><th>Year group</th><th>Details</th></tr>';
+  html += `<tr><td><strong>${bcg.name}</strong></td><td class="date-cell">${fmtDateArr(bcg.birthTo)}</td><td>Year ${bcg.yearGroup}</td><td>${bcg.detail}<br><span class="note-cell">${bcg.note}</span></td></tr>`;
+  html += '</table></div>';
+
+  // --- HPV routine ---
+  html += '<div class="sched-section"><h3>HPV (routine, Year 8)</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Admin from</th><th>Admin to</th><th>Sex</th><th>Notes</th></tr>';
+  for (const v of DATA.hpv) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.adminFrom)}</td><td class="date-cell">${fmtDateArr(v.adminTo)}</td><td>${v.sex === 'any' ? 'All' : v.sex === 'female' ? 'Girls' : 'Boys'}</td><td class="note-cell">${v.note || ''}</td></tr>`;
+  }
+  html += '</table></div>';
+
+  // --- Teenage booster ---
+  html += '<div class="sched-section"><h3>Teenage booster (Year 9–10)</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Admin from</th><th>Admin to</th><th>Details</th></tr>';
+  for (const v of DATA.teenBooster) {
+    html += `<tr><td><strong>${v.name}</strong></td><td class="date-cell">${fmtDateArr(v.adminFrom)}</td><td class="date-cell">${fmtDateArr(v.adminTo)}</td><td>${v.detail}</td></tr>`;
+  }
+  const tmac = DATA.teenMenACWY;
+  html += `<tr><td><strong>${tmac.name}</strong></td><td class="date-cell">${fmtDateArr(tmac.adminFrom)}</td><td class="date-cell">—</td><td>${tmac.detail}</td></tr>`;
+  html += '</table>';
+
+  // Uni MenACWY
+  const uniMac = DATA.uniMenACWY;
+  html += '<h3 style="margin-top:16px;">University freshers MenACWY catch-up</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Born from</th><th>Born to</th><th>Details</th></tr>';
+  html += `<tr><td><strong>${uniMac.name}</strong></td><td class="date-cell">${fmtDateArr(uniMac.birthFrom)}</td><td class="date-cell">${fmtDateArr(uniMac.birthTo)}</td><td>${uniMac.detail}<br><span class="note-cell">${uniMac.note || ''}</span></td></tr>`;
+  html += '</table></div>';
+
+  // --- Adult ---
+  html += '<div class="sched-section"><h3>Adult vaccines</h3>';
+  html += '<table class="sched-table"><tr><th>Vaccine</th><th>Eligibility</th><th>Details</th></tr>';
+  html += `<tr><td><strong>${DATA.adultFlu.name}</strong></td><td>Age 50+ (annually)</td><td>${DATA.adultFlu.detail}<br><span class="note-cell">${DATA.adultFlu.note || ''}</span></td></tr>`;
+  html += `<tr><td><strong>${DATA.ppv23.name}</strong></td><td>Age 65 (one-off)</td><td>${DATA.ppv23.detail}</td></tr>`;
+  html += `<tr><td><strong>${DATA.shingles.name}</strong></td><td>Age 65+</td><td>${DATA.shingles.detail}<br><span class="note-cell">${DATA.shingles.note || ''}</span></td></tr>`;
+  html += `<tr><td><strong>${DATA.covid.name}</strong></td><td>Born before ${fmtDateArr(DATA.covid.birthTo)}</td><td>${DATA.covid.detail}<br><span class="note-cell">${DATA.covid.note || ''}</span></td></tr>`;
+  html += '</table></div>';
+
+  // Source note
+  html += '<div class="sched-intro" style="margin-top:8px;">';
+  html += 'Sources: <a href="https://www.gov.uk/government/publications/vaccination-timeline" target="_blank">UKHSA Vaccination Timeline</a>, ';
+  html += '<a href="https://www.gov.uk/government/collections/immunisation" target="_blank">Green Book chapters</a>, ';
+  html += '<a href="https://www.nhs.uk/vaccinations/" target="_blank">NHS.UK Vaccinations</a>. Last updated: March 2026.';
+  html += '</div>';
+
+  document.getElementById('schedule-data-tab').innerHTML = html;
+}
+
 
 function loadFromUrl() {
   try {
