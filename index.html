@@ -507,14 +507,15 @@ function ageString(dob, now) {
 // September school year: child enters Year 8 (age 12-13) in Sept of the year they turn 13
 // For HPV/MenACWY: given in school Year 8 (age 12-13) or Year 9 (age 13-14)
 function schoolYearStart(dob, yearGroup) {
-  // UK school: Year 0 starts Sept in year child turns 5
-  // Year 8 = child turns 12-13 that school year
-  // Birth between 1 Sep and 31 Aug determines cohort
+  // UK school: Reception (Year 0) starts in September of the year the child turns 5
+  // A child born 1 Sep 1990 starts Reception Sept 1995 (turns 5 that month)
+  // A child born 31 Aug 1991 starts Reception Sept 1995 (turns 4 just before, turns 5 during year)
+  // Both are in the same academic cohort (born Sept 1990 – Aug 1991)
   let schoolStartYear;
-  if (dob.getMonth() >= 8) { // Sept-Dec born
-    schoolStartYear = dob.getFullYear() + 4 + yearGroup; // starts reception year+4 after birth year
-  } else { // Jan-Aug born
-    schoolStartYear = dob.getFullYear() + 3 + yearGroup;
+  if (dob.getMonth() >= 8) { // Sept-Dec born: starts Reception 5 years after birth year
+    schoolStartYear = dob.getFullYear() + 5 + yearGroup;
+  } else { // Jan-Aug born: starts Reception 4 years after birth year
+    schoolStartYear = dob.getFullYear() + 4 + yearGroup;
   }
   return dateFrom(schoolStartYear, 9, 1);
 }
@@ -759,13 +760,15 @@ function getVaccineSchedule(dob, sex) {
   // From 2004: DTaP/IPV (acellular pertussis + inactivated polio)
   const preschool = addMonths(dob, 40); // 3 years 4 months
 
+  // Pre-school booster depends on when it's GIVEN (preschool date), not birth year:
+  // Pre-~2001: DT + OPV (no pertussis). ~2001-2004: added pertussis. From 2004: DTaP/IPV (IPV replaced OPV).
   const preschoolItems = [];
-  if (dob >= dateFrom(2004, 9, 1)) {
+  if (preschool >= dateFrom(2004, 9, 1)) {
     preschoolItems.push({
       name: 'DTaP/IPV pre-school booster',
       detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio'
     });
-  } else if (dob >= dateFrom(2001, 1, 1)) {
+  } else if (preschool >= dateFrom(2001, 9, 1)) {
     preschoolItems.push({
       name: 'DT/acP/IPV pre-school booster',
       detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio'
@@ -920,10 +923,12 @@ function getVaccineSchedule(dob, sex) {
   const teenBoosterDate = schoolYearStart(dob, 9);
   const teenItems = [];
 
-  if (dob >= dateFrom(2004, 9, 1)) {
+  // IPV replaced OPV across the board from 2004, regardless of birth year
+  // So the switch is based on when the booster is given, not when the child was born
+  if (teenBoosterDate >= dateFrom(2004, 9, 1)) {
     teenItems.push({
       name: 'Td/IPV (3-in-1 teenage booster)',
-      detail: 'Booster against tetanus, diphtheria, and polio'
+      detail: 'Booster against tetanus, diphtheria, and polio (inactivated polio replaced oral polio from 2004)'
     });
   } else {
     teenItems.push({
