@@ -480,19 +480,310 @@
 
 <script>
 // ============================================================
-// UK VACCINATION SCHEDULE DATA
+// UK VACCINATION SCHEDULE — DATA & ENGINE
 // Historically accurate for births from 1980 to 2026
-// Verified against UKHSA Vaccination Timeline and GOV.UK sources, March 2026
+// Verified against UKHSA Vaccination Timeline and GOV.UK sources
+// Last updated: March 2026
+// ============================================================
+//
+// ARCHITECTURE:
+//   1. SCHEDULE_DATA — all vaccine names, dates, eligibility (easy to validate/maintain)
+//   2. Engine — interprets SCHEDULE_DATA for a given DOB + sex
+//   3. Display — renders the timeline to HTML
+//   4. Sharing — URL params, copy link, print, download
+//
+// To update the schedule, edit SCHEDULE_DATA only.
+// The engine and display should rarely need changes.
 // ============================================================
 
-// Helper: date comparison
-function dateFrom(y, m, d) { return new Date(y, m - 1, d); }
-function addWeeks(date, w) { const d = new Date(date); d.setDate(d.getDate() + w * 7); return d; }
-function addMonths(date, m) { const d = new Date(date); d.setMonth(d.getMonth() + m); return d; }
-function addYears(date, y) { const d = new Date(date); d.setFullYear(d.getFullYear() + y); return d; }
-function formatDate(d) {
+
+// ============================================================
+// SECTION 1: SCHEDULE DATA
+// ============================================================
+//
+// Date format: [year, month] or [year, month, day]  (month is 1-indexed)
+// birthFrom/birthTo: eligibility by date of birth
+// adminFrom/adminTo: eligibility by when the vaccine is administered
+// null = no limit in that direction
+//
+// To validate: cross-reference dates against
+//   https://www.gov.uk/government/publications/vaccination-timeline
+//   https://www.gov.uk/government/collections/immunisation
+// ============================================================
+
+const SCHEDULE_DATA = {
+
+  // ---- Scheduling: when the accelerated infant schedule replaced the old one ----
+  acceleratedScheduleFrom: [1990, 6, 1], // accelerated schedule introduced June 1990 in England/Wales
+
+  // ---- INFANT PRIMARY COURSE (3 doses) ----
+  // The main combination vaccine. Determined by BIRTH DATE.
+  infantCombo: [
+    { birthTo: [1992,10,1],  name: 'DTP + OPV',
+      detail: 'Protects against diphtheria, tetanus, and pertussis (whole-cell), plus oral polio vaccine' },
+    { birthFrom: [1992,10,1], birthTo: [2004,9,1], name: 'DTP/Hib + OPV',
+      detail: 'Protects against diphtheria, tetanus, pertussis (whole-cell), and Haemophilus influenzae type b, plus oral polio vaccine' },
+    { birthFrom: [2004,9,1],  birthTo: [2017,8,1], name: '5-in-1 (DTaP/IPV/Hib)',
+      detail: 'Protects against diphtheria, tetanus, pertussis (whooping cough), polio, and Haemophilus influenzae type b' },
+    { birthFrom: [2017,8,1],  name: '6-in-1 (DTaP/IPV/Hib/HepB)',
+      detail: 'Protects against diphtheria, tetanus, pertussis (whooping cough), polio, Haemophilus influenzae type b, and hepatitis B' },
+  ],
+
+  // Additional infant vaccines given alongside the primary course.
+  // 'doses' = which dose timepoints (1=first, 2=second, 3=third)
+  infantAdditional: [
+    { name: 'Rotavirus (Rotarix)',
+      detail: 'Oral vaccine protecting against rotavirus gastroenteritis',
+      birthFrom: [2013,5,1], doses: [1, 2] },
+
+    { name: 'MenB (Bexsero)',
+      detail: 'Protects against meningococcal group B disease',
+      birthFrom: [2015,5,1], doses: [1, 3],
+      variations: [
+        { birthFrom: [2025,4,1], doses: [1, 2] },  // moved from dose 3 to dose 2 timepoint
+      ] },
+
+    { name: 'PCV7 (Prevenar)',
+      detail: 'Protects against pneumococcal infections (meningitis, sepsis, pneumonia)',
+      birthFrom: [2006,9,1], birthTo: [2010,4,1], doses: [1, 3] },
+
+    { name: 'PCV13 (Prevenar 13)',
+      detail: 'Protects against pneumococcal infections (meningitis, sepsis, pneumonia)',
+      birthFrom: [2010,4,1], doses: [1, 3],
+      variations: [
+        { birthFrom: [2020,1,1], doses: [2] },     // 1+1 schedule: single dose at 12 weeks
+        { birthFrom: [2025,4,1], doses: [3] },     // moved to 16 weeks
+      ] },
+
+    { name: 'MenC',
+      detail: 'Meningococcal C conjugate vaccine (introduced November 1999)',
+      birthFrom: [1999,11,1], birthTo: [2006,9,1], doses: [1, 2, 3] },
+  ],
+
+  // ---- 12 MONTHS ----
+  twelveMonths: [
+    // Hib/MenC boosters
+    { name: 'Hib booster',         birthFrom: [2025,4,1],
+      detail: 'Haemophilus influenzae type b booster dose' },
+    { name: 'MenC (standalone)',    birthFrom: [2025,4,1],
+      detail: 'Meningococcal C booster – given separately following Menitorix discontinuation' },
+    { name: 'Hib/MenC booster',    birthFrom: [2006,3,1], birthTo: [2025,4,1],
+      detail: 'Combined Haemophilus influenzae type b and meningococcal C booster' },
+    { name: 'MenC booster',        birthFrom: [1999,11,1], birthTo: [2006,3,1],
+      detail: 'Meningococcal C conjugate vaccine booster (MenC introduced November 1999)' },
+
+    // MMR / MMRV
+    { name: 'MMRV – dose 1',       birthFrom: [2022,9,1],
+      detail: 'Protects against measles, mumps, rubella, and varicella (chickenpox). Introduced January 2026.' },
+    { name: 'MMR – dose 1',        birthFrom: [1988,10,1], birthTo: [2022,9,1],
+      detail: 'Protects against measles, mumps, and rubella (introduced October 1988)' },
+    { name: 'Measles vaccine – single dose', birthTo: [1988,10,1],
+      detail: 'Single measles vaccine (MMR was not yet available; introduced October 1988)' },
+
+    // PCV booster
+    { name: 'PCV7 booster',        birthFrom: [2006,9,1], birthTo: [2010,4,1],
+      detail: 'Pneumococcal conjugate vaccine booster dose' },
+    { name: 'PCV13 booster',       birthFrom: [2010,4,1],
+      detail: 'Pneumococcal conjugate vaccine booster dose' },
+
+    // MenB booster
+    { name: 'MenB booster',        birthFrom: [2015,5,1],
+      detail: 'Meningococcal B booster dose' },
+  ],
+
+  // ---- 18 MONTHS (new from January 2026) ----
+  eighteenMonths: {
+    birthFrom: [2024,7,1],
+    name: '6-in-1 (DTaP/IPV/Hib/HepB) – dose 4 (booster)',
+    detail: 'Fourth dose of the 6-in-1 vaccine, given at a new 18-month appointment introduced January 2026',
+  },
+
+  // ---- CHILDREN'S FLU (annual nasal spray) ----
+  childFlu: {
+    // Full programme (age 2-10) for births from Sept 2010
+    fullFrom: [2010,9,1],
+    // Partial (primary school only) for births Sept 2006 – Sept 2010
+    partialFrom: [2006,9,1],
+    partialStart: [2015,9,1], // earliest flu season they'd have caught
+  },
+
+  // ---- PRE-SCHOOL BOOSTER (3 years 4 months = 40 months) ----
+  // Vaccine product determined by ADMINISTRATION DATE, not birth date
+  preschoolBooster: [
+    { adminTo: [2001,9,1],  name: 'DT + OPV pre-school booster',
+      detail: 'Booster against diphtheria and tetanus, plus oral polio vaccine. Pertussis was not included in the pre-school booster at this time.' },
+    { adminFrom: [2001,9,1], adminTo: [2004,9,1], name: 'DT/acP/IPV pre-school booster',
+      detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio' },
+    { adminFrom: [2004,9,1], name: 'DTaP/IPV pre-school booster',
+      detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio' },
+  ],
+
+  // MMR dose 2 at pre-school: introduced October 1996
+  preschoolMMR: [
+    { birthFrom: [2022,9,1], name: 'MMRV – dose 2',
+      detail: 'Second dose of measles, mumps, rubella, and varicella vaccine' },
+    { birthFrom: [1993,6,1], birthTo: [2022,9,1], name: 'MMR – dose 2',
+      detail: 'Second dose of measles, mumps, and rubella vaccine (routine 2nd dose introduced 1996)' },
+    // Pre-June 1993 births: no routine MMR dose 2 at pre-school age
+  ],
+
+  // ---- CATCH-UP CAMPAIGNS ----
+  catchups: {
+    // MR catch-up November 1994
+    mr1994: {
+      birthFrom: [1978,11,1], birthTo: [1989,11,1],
+      date: [1994,11,1],
+      label: 'November 1994 (one-off catch-up)',
+      section: 'preschool',
+      name: 'Measles/Rubella (MR) catch-up campaign',
+      detail: 'A one-off national campaign in November 1994 offered MR vaccine to all children aged 5–16 to prevent a predicted measles epidemic.',
+      note: 'This was given regardless of previous measles or MMR vaccination. Around 8 million children were vaccinated.',
+    },
+
+    // MenC catch-up 1999–2001
+    menC1999: {
+      birthTo: [1999,11,1], // everyone born before Nov 1999 (in our 1980+ range)
+      date: [1999,11,1],    // started November 1999
+      section: 'preschool',
+      name: 'MenC (catch-up campaign)',
+      detail: 'Meningococcal C conjugate vaccine. When MenC was introduced in November 1999, a national catch-up campaign offered a single dose to everyone under 18.',
+      note: 'The schools-based catch-up started with the oldest year groups first and worked down over approximately 18 months. Those too young for school were vaccinated through their GP.',
+      // Label and timing are age-dependent — handled by engine
+      ageBands: [
+        { minAge: 11, label: 'Late 1999 – early 2000 (schools MenC catch-up)', monthsAfterStart: 2 },
+        { minAge: 5,  label: '2000 (schools MenC catch-up)',                    monthsAfterStart: 10 },
+        { minAge: 0,  label: '2000 (GP MenC catch-up)',                         monthsAfterStart: 7 },
+      ],
+    },
+
+    // HPV catch-up 2008–2010 (girls aged 13–18 when HPV launched)
+    // Source: GOV.UK HPV vaccination guidance
+    //   2008/09: girls born 1 Sep 1990 – 31 Aug 1991 (age 17–18)
+    //   2009/10: girls born 1 Sep 1991 – 31 Aug 1995 (age 14–18)
+    hpv2008: {
+      sex: 'female',
+      section: 'teenage',
+      name: 'HPV (catch-up)',
+      detail: 'When the HPV vaccination programme began in September 2008, a catch-up campaign offered HPV to girls aged 13–18 who had missed the routine Year 8 programme.',
+      note: 'Three doses of Cervarix were given. Girls born Sept 1990 – Aug 1991 were caught up in 2008/09; those born Sept 1991 – Aug 1995 in 2009/10.',
+      vaccine: 'HPV (Cervarix) – 3 doses (catch-up)',
+      // Birth cohort ranges for each catch-up year (from GOV.UK)
+      cohorts: [
+        { birthFrom: [1990,9,1], birthTo: [1991,9,1], academicYear: 2008 },
+        { birthFrom: [1991,9,1], birthTo: [1995,9,1], academicYear: 2009 },
+      ],
+    },
+  },
+
+  // ---- BCG (universal schools programme until 2005) ----
+  bcg: {
+    birthTo: [1991,9,1],
+    yearGroup: 8,
+    name: 'BCG (tuberculosis)',
+    detail: 'Bacillus Calmette-Guérin vaccine protecting against tuberculosis. Given to all schoolchildren.',
+    note: 'The universal schools BCG programme ended in 2005, replaced by targeted neonatal vaccination for babies at higher risk.',
+  },
+
+  // ---- HPV (routine, school Year 8) ----
+  // Determined by ADMINISTRATION DATE (Year 8 school date)
+  hpv: [
+    { adminFrom: [2008,9,1], adminTo: [2012,9,1], sex: 'female',
+      name: 'HPV (Cervarix) – 3 doses',
+      detail: 'Protects against HPV types 16 and 18',
+      note: 'Girls-only programme at this time. Switched to Gardasil from Sept 2012, reduced to 2 doses from Sept 2014. Boys added from Sept 2019.' },
+    { adminFrom: [2012,9,1], adminTo: [2014,9,1], sex: 'female',
+      name: 'HPV (Gardasil) – 3 doses',
+      detail: 'Protects against HPV types 6, 11, 16, 18',
+      note: 'Girls-only programme. Gardasil replaced Cervarix from September 2012. Reduced to 2 doses from September 2014. Boys added from Sept 2019.' },
+    { adminFrom: [2014,9,1], adminTo: [2019,9,1], sex: 'female',
+      name: 'HPV (Gardasil) – 2 doses',
+      detail: 'Protects against HPV types 6, 11, 16, 18',
+      note: 'Offered to girls in Year 8. Boys were not yet included (added from Sept 2019).' },
+    { adminFrom: [2019,9,1], adminTo: [2023,9,1], sex: 'any',
+      name: 'HPV (Gardasil) – 2 doses',
+      detail: 'Protects against HPV types 6, 11, 16, 18',
+      note: 'Offered to all Year 8 pupils (boys and girls) from Sept 2019.' },
+    { adminFrom: [2023,9,1], sex: 'any',
+      name: 'HPV (Gardasil 9) – 1 dose',
+      detail: 'Protects against HPV types causing cervical and other cancers, and genital warts',
+      note: 'From September 2023, a single dose is offered to all Year 8 pupils.' },
+  ],
+
+  // HPV "not offered" note for boys before 2019
+  hpvMaleNotOffered: {
+    adminFrom: [2008,9,1], adminTo: [2019,9,1],
+    name: 'HPV – not offered',
+    detail: 'The HPV vaccine was only offered to girls at this time.',
+    note: 'The programme was extended to boys from September 2019. Males born before September 2006 were not routinely eligible.',
+  },
+
+  // ---- TEENAGE BOOSTER (Year 9–10) ----
+  // Vaccine product determined by ADMINISTRATION DATE
+  teenBooster: [
+    { adminTo: [2004,9,1], name: "Td + OPV (school leavers' booster)",
+      detail: 'Booster against tetanus and diphtheria, plus oral polio vaccine' },
+    { adminFrom: [2004,9,1], name: 'Td/IPV (3-in-1 teenage booster)',
+      detail: 'Booster against tetanus, diphtheria, and polio (inactivated polio replaced oral polio from 2004)' },
+  ],
+
+  // MenACWY for teenagers (from 2015)
+  teenMenACWY: {
+    adminFrom: [2015,8,1],
+    name: 'MenACWY',
+    detail: 'Protects against meningococcal groups A, C, W, and Y. Introduced for teenagers from 2015.',
+  },
+
+  // University freshers MenACWY catch-up (2015–2020)
+  uniMenACWY: {
+    birthFrom: [2001,1,1], birthTo: [2003,9,1],
+    name: 'MenACWY (catch-up)',
+    detail: 'Meningococcal ACWY vaccine offered to university freshers as part of the 2015–2020 catch-up campaign',
+    note: 'You may have been offered this when starting university, as you were too old for the school-based MenACWY programme.',
+  },
+
+  // ---- ADULT VACCINES ----
+  adultFlu: {
+    name: 'Annual flu vaccine',
+    detail: 'Offered annually each autumn. From age 65, an enhanced (adjuvanted or cell-based) flu vaccine is used.',
+    note: 'Also offered to pregnant women, those with long-term health conditions, carers, and other at-risk groups at any age.',
+  },
+
+  ppv23: {
+    name: 'Pneumococcal polysaccharide vaccine (PPV23)',
+    detail: 'One-off vaccination protecting against 23 types of pneumococcal bacteria',
+  },
+
+  shingles: {
+    name: 'Shingles vaccine (Shingrix)',
+    detail: 'Two-dose course protecting against shingles. Originally offered from age 70 (from 2013), eligibility lowered to 65 from September 2023.',
+    note: 'Also offered to those aged 50+ who are severely immunosuppressed.',
+  },
+
+  covid: {
+    birthTo: [2012,1,1],
+    name: 'COVID-19 vaccine',
+    detail: 'COVID-19 vaccination was offered to all adults and most children aged 12+ during the pandemic. Primary course plus boosters.',
+    note: 'From 2024, routine seasonal COVID boosters are offered to those aged 65+ and clinically at-risk groups. The universal offer to healthy younger adults has ended.',
+  },
+
+  // ---- ABOUT BOX: milestones text ----
+  milestones: 'MMR replacing single vaccines (1988), accelerated infant schedule (1990), Hib added (1992), MR catch-up campaign (1994), MMR 2nd dose (1996), MenC (1999), 5-in-1 (2004), PCV (2006), HPV for girls (2008), rotavirus and childhood flu (2013), MenB (2015), 6-in-1 with HepB (2017), HPV for boys (2019), and MMRV replacing MMR (2026).',
+};
+
+
+// ============================================================
+// SECTION 2: SCHEDULE ENGINE
+// ============================================================
+
+// --- Utility functions ---
+function dateFrom(y, m, d) { return new Date(y, m - 1, d || 1); }
+function d(arr) { return dateFrom(arr[0], arr[1], arr[2] || 1); } // shorthand for data arrays
+function addWeeks(date, w) { const r = new Date(date); r.setDate(r.getDate() + w * 7); return r; }
+function addMonths(date, m) { const r = new Date(date); r.setMonth(r.getMonth() + m); return r; }
+function addYears(date, y) { const r = new Date(date); r.setFullYear(r.getFullYear() + y); return r; }
+function formatDate(dt) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  return `${dt.getDate()} ${months[dt.getMonth()]} ${dt.getFullYear()}`;
 }
 function ageString(dob, now) {
   let years = now.getFullYear() - dob.getFullYear();
@@ -504,570 +795,316 @@ function ageString(dob, now) {
   return `${years} years old`;
 }
 
-// September school year: child enters Year 8 (age 12-13) in Sept of the year they turn 13
-// For HPV/MenACWY: given in school Year 8 (age 12-13) or Year 9 (age 13-14)
 function schoolYearStart(dob, yearGroup) {
-  // UK school: Reception (Year 0) starts in September of the year the child turns 5
-  // A child born 1 Sep 1990 starts Reception Sept 1995 (turns 5 that month)
-  // A child born 31 Aug 1991 starts Reception Sept 1995 (turns 4 just before, turns 5 during year)
-  // Both are in the same academic cohort (born Sept 1990 – Aug 1991)
   let schoolStartYear;
-  if (dob.getMonth() >= 8) { // Sept-Dec born: starts Reception 5 years after birth year
+  if (dob.getMonth() >= 8) { // Sept-Dec born
     schoolStartYear = dob.getFullYear() + 5 + yearGroup;
-  } else { // Jan-Aug born: starts Reception 4 years after birth year
+  } else { // Jan-Aug born
     schoolStartYear = dob.getFullYear() + 4 + yearGroup;
   }
   return dateFrom(schoolStartYear, 9, 1);
 }
 
-// ============================================================
-// VACCINE DEFINITIONS WITH HISTORICAL ELIGIBILITY
-// ============================================================
+// Match a data entry against a date of birth
+function birthMatch(entry, dob) {
+  if (entry.birthFrom && dob < d(entry.birthFrom)) return false;
+  if (entry.birthTo && dob >= d(entry.birthTo)) return false;
+  return true;
+}
 
+// Match a data entry against an administration date
+function adminMatch(entry, adminDate) {
+  if (entry.adminFrom && adminDate < d(entry.adminFrom)) return false;
+  if (entry.adminTo && adminDate >= d(entry.adminTo)) return false;
+  return true;
+}
+
+// Match sex
+function sexMatch(entry, sex) {
+  if (!entry.sex || entry.sex === 'any') return true;
+  return entry.sex === sex;
+}
+
+// --- Main schedule builder ---
 function getVaccineSchedule(dob, sex) {
   const vaccines = [];
-  const dobDate = dob;
   const now = new Date();
+  const DATA = SCHEDULE_DATA;
 
-  // Helper to determine programme status
   function status(dueDate) {
-    if (dueDate <= now) return 'past';
-    return 'future';
+    return dueDate <= now ? 'past' : 'future';
   }
 
-  // ============ INFANT VACCINES ============
-  // Schedule timing changed over the years:
-  // Pre-1990: 3, 5, 9-11 months
-  // 1990 onwards: accelerated to 2, 3, 4 months (≈ 8, 12, 16 weeks)
+  // ============ INFANT PRIMARY COURSE (3 doses) ============
+  const accelerated = dob >= d(DATA.acceleratedScheduleFrom);
+  const dose1 = accelerated ? addWeeks(dob, 8) : addMonths(dob, 3);
+  const dose2 = accelerated ? addWeeks(dob, 12) : addMonths(dob, 5);
+  const dose3 = accelerated ? addWeeks(dob, 16) : addMonths(dob, 9);
+  const doseLabels = accelerated
+    ? ['8 weeks', '12 weeks', '16 weeks']
+    : ['3 months', '5 months', '9–11 months'];
+  const doseDates = [dose1, dose2, dose3];
 
-  const acceleratedSchedule = dob >= dateFrom(1990, 5, 1);
-  const dose1 = acceleratedSchedule ? addWeeks(dob, 8) : addMonths(dob, 3);
-  const dose2 = acceleratedSchedule ? addWeeks(dob, 12) : addMonths(dob, 5);
-  const dose3 = acceleratedSchedule ? addWeeks(dob, 16) : addMonths(dob, 9);
-  const ageLabel1 = acceleratedSchedule ? '8 weeks' : '3 months';
-  const ageLabel2 = acceleratedSchedule ? '12 weeks' : '5 months';
-  const ageLabel3 = acceleratedSchedule ? '16 weeks' : '9–11 months';
-
-  // --- PRIMARY COURSE: DTaP/DTP-containing vaccines ---
-  // Pre-1992: DTP + OPV (whole-cell pertussis, no Hib)
-  // 1992-2004: DTP/Hib (or DTwP/Hib) + OPV (Hib added Oct 1992)
-  // 2004 onwards: 5-in-1 DTaP/IPV/Hib (acellular pertussis, inactivated polio replaced OPV)
-  // Aug 2017 onwards: 6-in-1 DTaP/IPV/Hib/HepB
-  let comboVaccineName, comboDetail;
-
-  if (dob >= dateFrom(2017, 8, 1)) {
-    comboVaccineName = '6-in-1 (DTaP/IPV/Hib/HepB)';
-    comboDetail = 'Protects against diphtheria, tetanus, pertussis (whooping cough), polio, Haemophilus influenzae type b, and hepatitis B';
-  } else if (dob >= dateFrom(2004, 9, 1)) {
-    comboVaccineName = '5-in-1 (DTaP/IPV/Hib)';
-    comboDetail = 'Protects against diphtheria, tetanus, pertussis (whooping cough), polio, and Haemophilus influenzae type b';
-  } else if (dob >= dateFrom(1992, 10, 1)) {
-    comboVaccineName = 'DTP/Hib + OPV';
-    comboDetail = 'Protects against diphtheria, tetanus, pertussis (whole-cell), and Haemophilus influenzae type b, plus oral polio vaccine';
-  } else {
-    comboVaccineName = 'DTP + OPV';
-    comboDetail = 'Protects against diphtheria, tetanus, and pertussis (whole-cell), plus oral polio vaccine';
+  // Find the matching combo vaccine
+  const combo = DATA.infantCombo.find(c => birthMatch(c, dob));
+  const items = [[], [], []]; // items for each dose timepoint
+  for (let i = 0; i < 3; i++) {
+    items[i].push({ name: `${combo.name} – dose ${i + 1}`, detail: combo.detail });
   }
 
-  // Items for each dose timepoint
-  const items1 = [{ name: `${comboVaccineName} – dose 1`, detail: comboDetail }];
-  const items2 = [{ name: `${comboVaccineName} – dose 2`, detail: comboDetail }];
-  const items3 = [{ name: `${comboVaccineName} – dose 3`, detail: comboDetail }];
+  // Additional infant vaccines
+  for (const vacc of DATA.infantAdditional) {
+    if (!birthMatch(vacc, dob)) continue;
 
-  // --- ROTAVIRUS ---
-  // Introduced July 2013 (2 doses: 8 and 12 weeks)
-  if (dob >= dateFrom(2013, 5, 1)) {
-    items1.push({
-      name: 'Rotavirus (Rotarix) – dose 1',
-      detail: 'Oral vaccine protecting against rotavirus gastroenteritis'
-    });
-    items2.push({
-      name: 'Rotavirus (Rotarix) – dose 2',
-      detail: 'Oral vaccine protecting against rotavirus gastroenteritis'
-    });
-  }
-
-  // --- MenB ---
-  // Introduced September 2015 (for babies born on or after 1 May 2015)
-  // Originally: 8 weeks, 16 weeks, 12 months
-  // From July 2025: 8 weeks, 12 weeks
-  if (dob >= dateFrom(2015, 5, 1)) {
-    items1.push({
-      name: 'MenB (Bexsero) – dose 1',
-      detail: 'Protects against meningococcal group B disease'
-    });
-    if (dob >= dateFrom(2025, 4, 1)) {
-      items2.push({ name: 'MenB (Bexsero) – dose 2', detail: 'Protects against meningococcal group B disease' });
-    } else {
-      items3.push({ name: 'MenB (Bexsero) – dose 2', detail: 'Protects against meningococcal group B disease' });
-    }
-  }
-
-  // --- PCV (Pneumococcal conjugate vaccine) ---
-  // PCV7 introduced Sept 2006; PCV13 replaced PCV7 April 2010
-  // 2+1 schedule (2m, 4m, 13m) until Jan 2020; then 1+1 (12w + 12m)
-  // From July 2025: moved to 16 weeks
-  if (dob >= dateFrom(2006, 9, 1)) {
-    const pcvName = dob >= dateFrom(2010, 4, 1) ? 'PCV13 (Prevenar 13)' : 'PCV7 (Prevenar)';
-    if (dob >= dateFrom(2025, 4, 1)) {
-      items3.push({ name: `${pcvName} – single dose`, detail: 'Protects against pneumococcal infections (meningitis, sepsis, pneumonia)' });
-    } else if (dob >= dateFrom(2020, 1, 1)) {
-      items2.push({ name: `${pcvName} – single dose`, detail: 'Protects against pneumococcal infections (meningitis, sepsis, pneumonia)' });
-    } else {
-      items1.push({ name: `${pcvName} – dose 1`, detail: 'Protects against pneumococcal infections (meningitis, sepsis, pneumonia)' });
-      items3.push({ name: `${pcvName} – dose 2`, detail: 'Protects against pneumococcal infections' });
-    }
-  }
-
-  // --- MenC (separate injections, 1999–2006) ---
-  // MenC conjugate vaccine introduced November 1999
-  // Given at 2, 3, 4 months as separate injections alongside DTP/Hib
-  // From 2006, infant MenC doses were reduced and combined with Hib booster at 12m
-  if (dob >= dateFrom(1999, 11, 1) && dob < dateFrom(2006, 9, 1)) {
-    items1.push({ name: 'MenC – dose 1', detail: 'Meningococcal C conjugate vaccine (introduced November 1999)' });
-    items2.push({ name: 'MenC – dose 2', detail: 'Meningococcal C conjugate vaccine' });
-    items3.push({ name: 'MenC – dose 3', detail: 'Meningococcal C conjugate vaccine' });
-  }
-
-  // Push infant dose groups
-  vaccines.push({ ageLabel: ageLabel1, dueDate: dose1, status: status(dose1), items: items1 });
-  vaccines.push({ ageLabel: ageLabel2, dueDate: dose2, status: status(dose2), items: items2 });
-  vaccines.push({ ageLabel: ageLabel3, dueDate: dose3, status: status(dose3), items: items3 });
-
-  // ============ 12 MONTHS ============
-  const month12 = addMonths(dob, 12);
-  const items12m = [];
-
-  // Hib/MenC booster history:
-  // Pre-1992: no Hib. Pre-1999: no MenC.
-  // 1999-2005: MenC given at 2, 3, 4 months + booster (varied)
-  // 2006: Hib/MenC combined booster at 12 months introduced
-  // July 2025: Menitorix discontinued; standalone Hib + MenC
-  if (dob >= dateFrom(2025, 4, 1)) {
-    items12m.push({
-      name: 'Hib booster',
-      detail: 'Haemophilus influenzae type b booster dose'
-    });
-    items12m.push({
-      name: 'MenC (standalone)',
-      detail: 'Meningococcal C booster – given separately following Menitorix discontinuation'
-    });
-  } else if (dob >= dateFrom(2006, 3, 1)) {
-    items12m.push({
-      name: 'Hib/MenC booster',
-      detail: 'Combined Haemophilus influenzae type b and meningococcal C booster'
-    });
-  } else if (dob >= dateFrom(1999, 11, 1)) {
-    // MenC was given at 2, 3, 4 months with a booster around 12 months
-    items12m.push({
-      name: 'MenC booster',
-      detail: 'Meningococcal C conjugate vaccine booster (MenC introduced November 1999)'
-    });
-  }
-  // Pre-1999: no MenC or Hib booster at 12 months
-
-  // MMR: introduced October 1988 (replaced single measles vaccine)
-  // From Jan 2026: MMRV replaces MMR (for children born on or after 1 Sept 2022)
-  if (dob >= dateFrom(2022, 9, 1)) {
-    items12m.push({
-      name: 'MMRV – dose 1',
-      detail: 'Protects against measles, mumps, rubella, and varicella (chickenpox). Introduced January 2026.'
-    });
-  } else if (dob >= dateFrom(1988, 10, 1)) {
-    items12m.push({
-      name: 'MMR – dose 1',
-      detail: 'Protects against measles, mumps, and rubella (introduced October 1988)'
-    });
-  } else {
-    // Pre-1988: single measles vaccine at ~13 months
-    items12m.push({
-      name: 'Measles vaccine – single dose',
-      detail: 'Single measles vaccine (MMR was not yet available; introduced October 1988)'
-    });
-  }
-
-  // PCV booster at 12 months (if born after PCV introduction)
-  if (dob >= dateFrom(2006, 9, 1)) {
-    const pcvName = dob >= dateFrom(2010, 4, 1) ? 'PCV13' : 'PCV7';
-    items12m.push({
-      name: `${pcvName} booster`,
-      detail: 'Pneumococcal conjugate vaccine booster dose'
-    });
-  }
-
-  // MenB booster at 12 months (from Sept 2015 programme)
-  if (dob >= dateFrom(2015, 5, 1)) {
-    items12m.push({
-      name: 'MenB booster',
-      detail: 'Meningococcal B booster dose'
-    });
-  }
-
-  vaccines.push({
-    ageLabel: '1 year (around 12–13 months)',
-    dueDate: month12,
-    status: status(month12),
-    items: items12m
-  });
-
-  // ============ 18 MONTHS (from Jan 2026) ============
-  if (dob >= dateFrom(2024, 7, 1)) {
-    const month18 = addMonths(dob, 18);
-    vaccines.push({
-      ageLabel: '18 months (new from January 2026)',
-      dueDate: month18,
-      status: status(month18),
-      items: [{
-        name: `6-in-1 (DTaP/IPV/Hib/HepB) – dose 4 (booster)`,
-        detail: 'Fourth dose of the 6-in-1 vaccine, given at a new 18-month appointment introduced January 2026'
-      }]
-    });
-  }
-
-  // ============ ANNUAL FLU (ages 2–10, from 2013/14 phased rollout) ============
-  // Phased: 2013/14 pilot age 2-3, expanded each year, all primary school by ~2017/18
-  // Full 2-10 (Reception to Year 6) from ~2019/20 season
-  if (dob >= dateFrom(2010, 9, 1)) {
-    const fluStart = addYears(dob, 2);
-    const fluNote = 'Annual nasal flu spray (Fluenz Tetra) offered each autumn/winter during eligible years';
-    vaccines.push({
-      ageLabel: '2–10 years (annual, each autumn)',
-      dueDate: fluStart,
-      status: status(fluStart),
-      items: [{
-        name: 'Children\'s flu vaccine (nasal spray)',
-        detail: fluNote,
-        note: 'Phased rollout from 2013/14. Most children aged 2–3 eligible from 2013, extended to primary school age by ~2017, and up to Year 7 by 2020.'
-      }]
-    });
-  } else if (dob >= dateFrom(2006, 9, 1)) {
-    // These children would have been eligible for at least some of the rollout years
-    const fluStart = new Date(Math.max(dateFrom(2015, 9, 1).getTime(), addYears(dob, 2).getTime()));
-    vaccines.push({
-      ageLabel: 'Primary school age (annual, each autumn)',
-      dueDate: fluStart,
-      status: status(fluStart),
-      items: [{
-        name: 'Children\'s flu vaccine (nasal spray)',
-        detail: 'Annual nasal flu spray. You may have been eligible for some years as the programme was rolled out across primary schools from ~2015 onwards.',
-        note: 'Eligibility depended on which school years were included in each season\'s rollout.'
-      }]
-    });
-  }
-
-  // ============ PRE-SCHOOL BOOSTER (3 years 4 months) ============
-  // Pre-2001: DT + OPV booster (no pertussis component). Pertussis added to pre-school booster from ~2001.
-  // From 2004: DTaP/IPV (acellular pertussis + inactivated polio)
-  const preschool = addMonths(dob, 40); // 3 years 4 months
-
-  // Pre-school booster depends on when it's GIVEN (preschool date), not birth year:
-  // Pre-~2001: DT + OPV (no pertussis). ~2001-2004: added pertussis. From 2004: DTaP/IPV (IPV replaced OPV).
-  const preschoolItems = [];
-  if (preschool >= dateFrom(2004, 9, 1)) {
-    preschoolItems.push({
-      name: 'DTaP/IPV pre-school booster',
-      detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio'
-    });
-  } else if (preschool >= dateFrom(2001, 9, 1)) {
-    preschoolItems.push({
-      name: 'DT/acP/IPV pre-school booster',
-      detail: 'Booster dose protecting against diphtheria, tetanus, pertussis, and polio'
-    });
-  } else {
-    preschoolItems.push({
-      name: 'DT + OPV pre-school booster',
-      detail: 'Booster against diphtheria and tetanus, plus oral polio vaccine. Pertussis was not included in the pre-school booster at this time.'
-    });
-  }
-
-  // MMR dose 2: added to pre-school schedule from October 1996
-  // Before 1996: only one dose of MMR was given
-  if (dob >= dateFrom(2022, 9, 1)) {
-    preschoolItems.push({
-      name: 'MMRV – dose 2',
-      detail: 'Second dose of measles, mumps, rubella, and varicella vaccine'
-    });
-  } else if (dob >= dateFrom(1993, 6, 1)) {
-    // Children born from June 1993 would reach 3y4m from October 1996 when MMR2 was introduced
-    preschoolItems.push({
-      name: 'MMR – dose 2',
-      detail: 'Second dose of measles, mumps, and rubella vaccine (routine 2nd dose introduced 1996)'
-    });
-  }
-  // Pre-1993 births: no routine MMR dose 2 at pre-school age
-  // (MR catch-up campaign in Nov 1994 offered to 5-16 year olds)
-
-  vaccines.push({
-    ageLabel: '3 years 4 months (pre-school booster)',
-    dueDate: preschool,
-    status: status(preschool),
-    items: preschoolItems
-  });
-
-  // ============ MR CATCH-UP CAMPAIGN (November 1994) ============
-  // One-off measles/rubella catch-up for children aged 5-16
-  if (dob >= dateFrom(1978, 11, 1) && dob <= dateFrom(1989, 11, 1)) {
-    vaccines.push({
-      ageLabel: 'November 1994 (one-off catch-up)',
-      dueDate: dateFrom(1994, 11, 1),
-      status: 'past',
-      items: [{
-        name: 'Measles/Rubella (MR) catch-up campaign',
-        detail: 'A one-off national campaign in November 1994 offered MR vaccine to all children aged 5–16 to prevent a predicted measles epidemic.',
-        note: 'This was given regardless of previous measles or MMR vaccination. Around 8 million children were vaccinated.'
-      }]
-    });
-  }
-
-  // ============ MenC CATCH-UP CAMPAIGN (1999–2001) ============
-  // MenC conjugate vaccine introduced November 1999
-  // National catch-up: single dose offered to everyone under 18
-  // Schools: started with oldest year groups (Year 11+), worked down over ~18 months
-  // GP surgeries: for pre-school children
-  // Everyone in our 1980+ birth range was under 20 in Nov 1999, so all eligible
-  if (dob < dateFrom(1999, 11, 1)) {
-    // Approximate when the catch-up reached their age group
-    // Oldest students first (late 1999), youngest last (~2001)
-    const ageInNov99 = Math.floor((dateFrom(1999, 11, 1) - dob) / (365.25 * 24 * 60 * 60 * 1000));
-    let mencCatchupDate;
-    let mencAgeLabel;
-    if (ageInNov99 >= 11) {
-      // Secondary school (Year 7+): offered late 1999 to mid 2000
-      mencCatchupDate = dateFrom(2000, 1, 1);
-      mencAgeLabel = 'Late 1999 – early 2000 (schools MenC catch-up)';
-    } else if (ageInNov99 >= 5) {
-      // Primary school: offered mid to late 2000
-      mencCatchupDate = dateFrom(2000, 9, 1);
-      mencAgeLabel = '2000 (schools MenC catch-up)';
-    } else {
-      // Under school age: offered through GP
-      mencCatchupDate = dateFrom(2000, 6, 1);
-      mencAgeLabel = '2000 (GP MenC catch-up)';
-    }
-    vaccines.push({
-      ageLabel: mencAgeLabel,
-      dueDate: mencCatchupDate,
-      status: 'past',
-      items: [{
-        name: 'MenC (catch-up campaign)',
-        detail: 'Meningococcal C conjugate vaccine. When MenC was introduced in November 1999, a national catch-up campaign offered a single dose to everyone under 18.',
-        note: 'The schools-based catch-up started with the oldest year groups first and worked down over approximately 18 months. Those too young for school were vaccinated through their GP.'
-      }]
-    });
-  }
-
-  // ============ BCG (school-based, universal until 2005) ============
-  // Universal BCG for schoolchildren aged ~13 (Year 8/9) until 2005
-  // From 2005: replaced by targeted neonatal programme for high-risk groups only
-  // Last cohort: those in Year 9 in 2004/05 (born ~Sept 1989 – Aug 1990) or Year 8 in 2005
-  // Using Sept 1991 as approximate cutoff to capture final cohorts
-  if (dob < dateFrom(1991, 9, 1)) {
-    const bcgDate = schoolYearStart(dob, 8);
-    vaccines.push({
-      ageLabel: 'Year 8–9 (age 12–14, school-based)',
-      dueDate: bcgDate,
-      status: status(bcgDate),
-      items: [{
-        name: 'BCG (tuberculosis)',
-        detail: 'Bacillus Calmette-Guérin vaccine protecting against tuberculosis. Given to all schoolchildren.',
-        note: 'The universal schools BCG programme ended in 2005, replaced by targeted neonatal vaccination for babies at higher risk.'
-      }]
-    });
-  }
-
-  // ============ HPV (school Year 8, age 12-13) ============
-  // Girls: from Sept 2008 (Year 8) — all females in our 2001+ birth range are eligible
-  // Boys: from Sept 2019 school year (Year 8 in 2019/20 = born Sept 2006 – Aug 2007)
-  // Doses: 3 doses (Cervarix) until 2014, then 2 doses (Gardasil) from Sept 2014, then 1 dose from Sept 2023
-
-  const hpvSchoolDate = schoolYearStart(dob, 8);
-  let hpvEligible = false;
-  let hpvName = '';
-  let hpvDetail = '';
-  let hpvNote = '';
-
-  const isFemale = sex === 'female';
-  const isMale = sex === 'male';
-
-  // Boys eligible from Sept 2019 school year onwards
-  // Girls eligible throughout (HPV programme started Sept 2008)
-  const maleEligibleForHPV = isMale && hpvSchoolDate >= dateFrom(2019, 9, 1);
-  const femaleEligibleForHPV = isFemale && hpvSchoolDate >= dateFrom(2008, 9, 1);
-
-  if (maleEligibleForHPV || femaleEligibleForHPV) {
-    if (hpvSchoolDate >= dateFrom(2023, 9, 1)) {
-      hpvEligible = true;
-      hpvName = 'HPV (Gardasil 9) – 1 dose';
-      hpvDetail = 'Protects against HPV types causing cervical and other cancers, and genital warts';
-      hpvNote = 'From September 2023, a single dose is offered to all Year 8 pupils.';
-    } else if (hpvSchoolDate >= dateFrom(2014, 9, 1)) {
-      hpvEligible = true;
-      hpvName = 'HPV (Gardasil) – 2 doses';
-      hpvDetail = 'Protects against HPV types 6, 11, 16, 18';
-      if (isMale) {
-        hpvNote = 'The programme was extended to boys from September 2019.';
-      } else {
-        hpvNote = hpvSchoolDate < dateFrom(2019, 9, 1)
-          ? 'Offered to girls in Year 8. Boys were not yet included (added from Sept 2019).'
-          : 'Offered to all Year 8 pupils (boys and girls) from Sept 2019.';
+    // Check for variations (override doses based on birth date)
+    let doses = vacc.doses;
+    if (vacc.variations) {
+      for (const v of vacc.variations) {
+        if (birthMatch(v, dob)) {
+          doses = v.doses;
+        }
       }
-    } else if (hpvSchoolDate >= dateFrom(2012, 9, 1) && isFemale) {
-      hpvEligible = true;
-      hpvName = 'HPV (Gardasil) – 3 doses';
-      hpvDetail = 'Protects against HPV types 6, 11, 16, 18';
-      hpvNote = 'Girls-only programme. Gardasil replaced Cervarix from September 2012. Reduced to 2 doses from September 2014. Boys added from Sept 2019.';
-    } else if (hpvSchoolDate >= dateFrom(2008, 9, 1) && isFemale) {
-      hpvEligible = true;
-      hpvName = 'HPV (Cervarix) – 3 doses';
-      hpvDetail = 'Protects against HPV types 16 and 18';
-      hpvNote = 'Girls-only programme at this time. Switched to Gardasil from Sept 2012, reduced to 2 doses from Sept 2014. Boys added from Sept 2019.';
     }
-  }
 
-  // If male and NOT eligible but HPV existed, show a note explaining why
-  if (isMale && !hpvEligible && hpvSchoolDate >= dateFrom(2008, 9, 1) && hpvSchoolDate < dateFrom(2019, 9, 1)) {
-    vaccines.push({
-      ageLabel: 'Year 8 (age 12–13, school-based)',
-      dueDate: hpvSchoolDate,
-      status: 'not-eligible',
-      items: [{
-        name: 'HPV – not offered',
-        detail: 'The HPV vaccine was only offered to girls at this time.',
-        note: 'The programme was extended to boys from September 2019. Males born before September 2006 were not routinely eligible.'
-      }]
-    });
-  }
-
-  if (hpvEligible) {
-    vaccines.push({
-      ageLabel: 'Year 8 (age 12–13, school-based)',
-      dueDate: hpvSchoolDate,
-      status: status(hpvSchoolDate),
-      items: [{
-        name: hpvName,
-        detail: hpvDetail,
-        note: hpvNote
-      }]
-    });
-  }
-
-  // ============ TEENAGE BOOSTER (Year 9-10, age 13-14) ============
-  // Pre-2004: Td + OPV (school leavers' booster, sometimes given at 15-18)
-  // 2004 onwards: Td/IPV (inactivated polio replaced OPV)
-  // MenC teenage dose: from 1999 catch-up, then routine
-  // MenACWY: replaced MenC for teenagers from Aug 2015
-
-  const teenBoosterDate = schoolYearStart(dob, 9);
-  const teenItems = [];
-
-  // IPV replaced OPV across the board from 2004, regardless of birth year
-  // So the switch is based on when the booster is given, not when the child was born
-  if (teenBoosterDate >= dateFrom(2004, 9, 1)) {
-    teenItems.push({
-      name: 'Td/IPV (3-in-1 teenage booster)',
-      detail: 'Booster against tetanus, diphtheria, and polio (inactivated polio replaced oral polio from 2004)'
-    });
-  } else {
-    teenItems.push({
-      name: 'Td + OPV (school leavers\' booster)',
-      detail: 'Booster against tetanus and diphtheria, plus oral polio vaccine'
-    });
-  }
-
-  // MenACWY from 2015 (MenC catch-up for pre-1999 births is handled in a separate section above)
-  if (teenBoosterDate >= dateFrom(2015, 8, 1)) {
-    teenItems.push({
-      name: 'MenACWY',
-      detail: 'Protects against meningococcal groups A, C, W, and Y. Introduced for teenagers from 2015.'
-    });
-  }
-
-  vaccines.push({
-    ageLabel: 'Year 9–10 (age 13–14, school-based)',
-    dueDate: teenBoosterDate,
-    status: status(teenBoosterDate),
-    items: teenItems
-  });
-
-  // ============ UNIVERSITY FRESHERS MenACWY (2015-2020 catch-up) ============
-  // One-off catch-up: offered to those starting university from 2015 who missed school programme
-  const uniAge = addYears(dob, 18);
-  if (dob >= dateFrom(2001, 1, 1) && dob < dateFrom(2003, 9, 1)) {
-    // These cohorts were too old for the school programme but eligible for freshers catch-up
-    if (teenBoosterDate < dateFrom(2015, 8, 1)) {
-      vaccines.push({
-        ageLabel: 'Age 17–18 (university freshers catch-up)',
-        dueDate: uniAge,
-        status: status(uniAge),
-        items: [{
-          name: 'MenACWY (catch-up)',
-          detail: 'Meningococcal ACWY vaccine offered to university freshers as part of the 2015–2020 catch-up campaign',
-          note: 'You may have been offered this when starting university, as you were too old for the school-based MenACWY programme.'
-        }]
+    for (const doseNum of doses) {
+      const idx = doseNum - 1; // 0-indexed
+      const isMultiDose = doses.length > 1;
+      const doseLabel = isMultiDose ? ` – dose ${doses.indexOf(doseNum) + 1}` : ' – single dose';
+      items[idx].push({
+        name: `${vacc.name}${isMultiDose ? doseLabel : doseLabel}`,
+        detail: vacc.detail,
       });
     }
   }
 
-  // ============ ADULT VACCINES ============
-
-  // --- Flu (annual from age 50+, and 65+) ---
-  const age50 = addYears(dob, 50);
-  const age65 = addYears(dob, 65);
-  if (age50 <= addYears(now, 40)) { // only show if somewhat relevant
+  // Push infant dose groups
+  for (let i = 0; i < 3; i++) {
     vaccines.push({
-      ageLabel: 'Age 50+ (annual, each autumn)',
-      dueDate: age50,
-      status: status(age50),
-      items: [{
-        name: 'Annual flu vaccine',
-        detail: 'Offered annually each autumn. From age 65, an enhanced (adjuvanted or cell-based) flu vaccine is used.',
-        note: 'Also offered to pregnant women, those with long-term health conditions, carers, and other at-risk groups at any age.'
-      }]
+      ageLabel: doseLabels[i], dueDate: doseDates[i],
+      status: status(doseDates[i]), items: items[i], section: 'infant'
     });
   }
 
-  // --- Pneumococcal (PPV23 at 65) ---
+  // ============ 12 MONTHS ============
+  const month12 = addMonths(dob, 12);
+  const items12m = [];
+  for (const vacc of DATA.twelveMonths) {
+    if (birthMatch(vacc, dob)) {
+      items12m.push({ name: vacc.name, detail: vacc.detail });
+    }
+  }
+  if (items12m.length > 0) {
+    vaccines.push({
+      ageLabel: '1 year (around 12–13 months)', dueDate: month12,
+      status: status(month12), items: items12m, section: 'infant'
+    });
+  }
+
+  // ============ 18 MONTHS (from Jan 2026) ============
+  const m18 = DATA.eighteenMonths;
+  if (birthMatch(m18, dob)) {
+    vaccines.push({
+      ageLabel: '18 months (new from January 2026)', dueDate: addMonths(dob, 18),
+      status: status(addMonths(dob, 18)), section: 'infant',
+      items: [{ name: m18.name, detail: m18.detail }],
+    });
+  }
+
+  // ============ CHILDREN'S FLU ============
+  const cf = DATA.childFlu;
+  if (dob >= d(cf.fullFrom)) {
+    vaccines.push({
+      ageLabel: '2–10 years (annual, each autumn)', dueDate: addYears(dob, 2),
+      status: status(addYears(dob, 2)), section: 'preschool',
+      items: [{ name: "Children's flu vaccine (nasal spray)",
+        detail: 'Annual nasal flu spray (Fluenz Tetra) offered each autumn/winter during eligible years',
+        note: 'Phased rollout from 2013/14. Most children aged 2–3 eligible from 2013, extended to primary school age by ~2017, and up to Year 7 by 2020.' }],
+    });
+  } else if (dob >= d(cf.partialFrom)) {
+    const fluStart = new Date(Math.max(d(cf.partialStart).getTime(), addYears(dob, 2).getTime()));
+    vaccines.push({
+      ageLabel: 'Primary school age (annual, each autumn)', dueDate: fluStart,
+      status: status(fluStart), section: 'preschool',
+      items: [{ name: "Children's flu vaccine (nasal spray)",
+        detail: "Annual nasal flu spray. You may have been eligible for some years as the programme was rolled out across primary schools from ~2015 onwards.",
+        note: "Eligibility depended on which school years were included in each season's rollout." }],
+    });
+  }
+
+  // ============ PRE-SCHOOL BOOSTER (3 years 4 months) ============
+  const preschool = addMonths(dob, 40);
+  const preschoolItems = [];
+
+  // Booster vaccine — based on admin date
+  const psBooster = DATA.preschoolBooster.find(b => adminMatch(b, preschool));
+  if (psBooster) {
+    preschoolItems.push({ name: psBooster.name, detail: psBooster.detail });
+  }
+
+  // MMR/MMRV dose 2
+  const mmr2 = DATA.preschoolMMR.find(m => birthMatch(m, dob));
+  if (mmr2) {
+    preschoolItems.push({ name: mmr2.name, detail: mmr2.detail });
+  }
+
   vaccines.push({
-    ageLabel: 'Age 65 (one-off)',
-    dueDate: age65,
-    status: status(age65),
-    items: [{
-      name: 'Pneumococcal polysaccharide vaccine (PPV23)',
-      detail: 'One-off vaccination protecting against 23 types of pneumococcal bacteria'
-    }]
+    ageLabel: '3 years 4 months (pre-school booster)', dueDate: preschool,
+    status: status(preschool), items: preschoolItems, section: 'preschool'
   });
 
-  // --- Shingles ---
-  // Introduced Sept 2013 for age 70 (catch-up 71-79)
-  // From Sept 2023: eligible from age 65
-  const shinglesAge = dob <= dateFrom(1958, 9, 1) ? 65 : 65;
-  const shinglesDate = addYears(dob, 65);
+  // ============ CATCH-UP CAMPAIGNS ============
+
+  // MR 1994
+  const mr = DATA.catchups.mr1994;
+  if (birthMatch(mr, dob)) {
+    vaccines.push({
+      ageLabel: mr.label, dueDate: d(mr.date), status: 'past',
+      section: mr.section,
+      items: [{ name: mr.name, detail: mr.detail, note: mr.note }],
+    });
+  }
+
+  // MenC 1999
+  const mc = DATA.catchups.menC1999;
+  if (birthMatch(mc, dob)) {
+    const ageInNov99 = Math.floor((d(mc.date) - dob) / (365.25 * 24 * 60 * 60 * 1000));
+    // Find matching age band
+    const band = mc.ageBands.find(b => ageInNov99 >= b.minAge);
+    const catchupDate = addMonths(d(mc.date), band.monthsAfterStart);
+    vaccines.push({
+      ageLabel: band.label, dueDate: catchupDate, status: 'past',
+      section: mc.section,
+      items: [{ name: mc.name, detail: mc.detail, note: mc.note }],
+    });
+  }
+
+  // HPV catch-up 2008–2010
+  // Birth cohort based (from GOV.UK HPV vaccination guidance):
+  //   2008/09: born 1 Sep 1990 – 31 Aug 1991
+  //   2009/10: born 1 Sep 1991 – 31 Aug 1995
+  const hpvCU = DATA.catchups.hpv2008;
+  if (sex === hpvCU.sex || hpvCU.sex === 'any') {
+    for (const cohort of hpvCU.cohorts) {
+      if (dob >= d(cohort.birthFrom) && dob < d(cohort.birthTo)) {
+        const receptionYear = dob.getMonth() >= 8 ? dob.getFullYear() + 5 : dob.getFullYear() + 4;
+        const yearInCatchup = cohort.academicYear - receptionYear;
+        const catchupDate = dateFrom(cohort.academicYear, 9, 1);
+        vaccines.push({
+          ageLabel: `Year ${yearInCatchup} (HPV catch-up, ${cohort.academicYear}/${cohort.academicYear+1})`,
+          dueDate: catchupDate, status: 'past', section: 'teenage',
+          items: [{ name: hpvCU.vaccine, detail: hpvCU.detail, note: hpvCU.note }],
+        });
+        break;
+      }
+    }
+  }
+
+  // ============ BCG ============
+  const bcg = DATA.bcg;
+  if (birthMatch(bcg, dob)) {
+    const bcgDate = schoolYearStart(dob, bcg.yearGroup);
+    vaccines.push({
+      ageLabel: 'Year 8–9 (age 12–14, school-based)', dueDate: bcgDate,
+      status: status(bcgDate), section: 'teenage',
+      items: [{ name: bcg.name, detail: bcg.detail, note: bcg.note }],
+    });
+  }
+
+  // ============ HPV (routine, Year 8) ============
+  const hpvSchoolDate = schoolYearStart(dob, 8);
+  let hpvEntry = null;
+
+  for (const h of DATA.hpv) {
+    if (adminMatch(h, hpvSchoolDate) && sexMatch(h, sex)) {
+      hpvEntry = h;
+      break;
+    }
+  }
+
+  if (hpvEntry) {
+    vaccines.push({
+      ageLabel: 'Year 8 (age 12–13, school-based)', dueDate: hpvSchoolDate,
+      status: status(hpvSchoolDate), section: 'teenage',
+      items: [{ name: hpvEntry.name, detail: hpvEntry.detail, note: hpvEntry.note }],
+    });
+  } else if (sex === 'male') {
+    // Show "not offered" note for boys in the pre-2019 HPV era
+    const notOff = DATA.hpvMaleNotOffered;
+    if (adminMatch(notOff, hpvSchoolDate)) {
+      vaccines.push({
+        ageLabel: 'Year 8 (age 12–13, school-based)', dueDate: hpvSchoolDate,
+        status: 'not-eligible', section: 'teenage',
+        items: [{ name: notOff.name, detail: notOff.detail, note: notOff.note }],
+      });
+    }
+  }
+
+  // ============ TEENAGE BOOSTER (Year 9–10) ============
+  const teenBoosterDate = schoolYearStart(dob, 9);
+  const teenItems = [];
+
+  const tb = DATA.teenBooster.find(t => adminMatch(t, teenBoosterDate));
+  if (tb) {
+    teenItems.push({ name: tb.name, detail: tb.detail });
+  }
+
+  // MenACWY
+  const tmac = DATA.teenMenACWY;
+  if (adminMatch(tmac, teenBoosterDate)) {
+    teenItems.push({ name: tmac.name, detail: tmac.detail });
+  }
+
   vaccines.push({
-    ageLabel: 'Age 65 (from September 2023)',
-    dueDate: shinglesDate,
-    status: status(shinglesDate),
-    items: [{
-      name: 'Shingles vaccine (Shingrix)',
-      detail: 'Two-dose course protecting against shingles. Originally offered from age 70 (from 2013), eligibility lowered to 65 from September 2023.',
-      note: 'Also offered to those aged 50+ who are severely immunosuppressed.'
-    }]
+    ageLabel: 'Year 9–10 (age 13–14, school-based)', dueDate: teenBoosterDate,
+    status: status(teenBoosterDate), items: teenItems, section: 'teenage'
   });
 
-  // --- COVID-19 ---
-  // From 2021 onwards, various eligibility. For our age range (born 2001-2026):
-  // Most people born 2001-2008 would have been offered COVID vaccines from ~2021-2022
-  // Ongoing: seasonal COVID boosters for 65+ and at-risk groups
-  if (dob <= dateFrom(2012, 1, 1)) {
+  // ============ UNIVERSITY FRESHERS MenACWY ============
+  const uniMac = DATA.uniMenACWY;
+  if (birthMatch(uniMac, dob) && teenBoosterDate < d(DATA.teenMenACWY.adminFrom)) {
+    const uniAge = addYears(dob, 18);
+    vaccines.push({
+      ageLabel: 'Age 17–18 (university freshers catch-up)', dueDate: uniAge,
+      status: status(uniAge), section: 'teenage',
+      items: [{ name: uniMac.name, detail: uniMac.detail, note: uniMac.note }],
+    });
+  }
+
+  // ============ ADULT VACCINES ============
+  const age50 = addYears(dob, 50);
+  const age65 = addYears(dob, 65);
+
+  // Flu (50+)
+  if (age50 <= addYears(now, 40)) {
+    vaccines.push({
+      ageLabel: 'Age 50+ (annual, each autumn)', dueDate: age50,
+      status: status(age50), section: 'adult',
+      items: [{ name: DATA.adultFlu.name, detail: DATA.adultFlu.detail, note: DATA.adultFlu.note }],
+    });
+  }
+
+  // PPV23
+  vaccines.push({
+    ageLabel: 'Age 65 (one-off)', dueDate: age65,
+    status: status(age65), section: 'adult',
+    items: [{ name: DATA.ppv23.name, detail: DATA.ppv23.detail }],
+  });
+
+  // Shingles
+  vaccines.push({
+    ageLabel: 'Age 65 (from September 2023)', dueDate: addYears(dob, 65),
+    status: status(addYears(dob, 65)), section: 'adult',
+    items: [{ name: DATA.shingles.name, detail: DATA.shingles.detail, note: DATA.shingles.note }],
+  });
+
+  // COVID-19
+  const covidData = DATA.covid;
+  if (birthMatch(covidData, dob)) {
     const covidStart = new Date(Math.max(dateFrom(2021, 6, 1).getTime(), addYears(dob, 12).getTime()));
     vaccines.push({
-      ageLabel: 'COVID-19 programme (from 2021)',
-      dueDate: covidStart,
-      status: status(covidStart),
-      items: [{
-        name: 'COVID-19 vaccine',
-        detail: 'COVID-19 vaccination was offered to all adults and most children aged 12+ during the pandemic. Primary course plus boosters.',
-        note: 'From 2024, routine seasonal COVID boosters are offered to those aged 65+ and clinically at-risk groups. The universal offer to healthy younger adults has ended.'
-      }]
+      ageLabel: 'COVID-19 programme (from 2021)', dueDate: covidStart,
+      status: status(covidStart), section: 'adult',
+      items: [{ name: covidData.name, detail: covidData.detail, note: covidData.note }],
     });
   }
 
@@ -1076,7 +1113,7 @@ function getVaccineSchedule(dob, sex) {
 
 
 // ============================================================
-// RENDER
+// SECTION 3: DISPLAY
 // ============================================================
 
 function checkEligibility() {
@@ -1108,7 +1145,6 @@ function checkEligibility() {
   const dob = dateFrom(year, month, day);
   const now = new Date();
 
-  // Validate the date is real
   if (dob.getDate() !== day || dob.getMonth() !== month - 1) {
     document.getElementById('results').innerHTML = `
       <div class="container">
@@ -1133,7 +1169,6 @@ function checkEligibility() {
 
   let html = '<div class="container">';
 
-  // Summary
   html += `<div class="age-summary">
     <h2>Vaccination timeline for a ${sex} born ${formatDate(dob)}</h2>
     <div class="age-now">Currently ${ageString(dob, now)}</div>
@@ -1144,21 +1179,11 @@ function checkEligibility() {
     </div>
   </div>`;
 
-  // Group into sections
-  const childhood = vaccines.filter(v =>
-    v.ageLabel.includes('week') || v.ageLabel.includes('month') || v.ageLabel.includes('1 year')
-  );
-  const preschool = vaccines.filter(v =>
-    v.ageLabel.includes('flu') || v.ageLabel.includes('pre-school') || v.ageLabel.includes('Primary') ||
-    v.ageLabel.includes('2–10') || v.ageLabel.includes('catch-up')
-  );
-  const teenage = vaccines.filter(v =>
-    v.ageLabel.includes('Year 8') || v.ageLabel.includes('Year 9') || v.ageLabel.includes('university') ||
-    v.ageLabel.includes('BCG')
-  );
-  const adult = vaccines.filter(v =>
-    v.ageLabel.includes('50') || v.ageLabel.includes('65') || v.ageLabel.includes('COVID')
-  );
+  // Group by section property
+  const childhood = vaccines.filter(v => v.section === 'infant');
+  const preschoolVax = vaccines.filter(v => v.section === 'preschool');
+  const teenage = vaccines.filter(v => v.section === 'teenage');
+  const adult = vaccines.filter(v => v.section === 'adult');
 
   function renderSection(title, items) {
     if (items.length === 0) return '';
@@ -1186,14 +1211,13 @@ function checkEligibility() {
   }
 
   html += renderSection('🍼 Infant vaccinations', childhood);
-  html += renderSection('🧒 Pre-school & childhood', preschool);
+  html += renderSection('🧒 Pre-school & childhood', preschoolVax);
   html += renderSection('🎒 Teenage vaccinations (school-based)', teenage);
   html += renderSection('🧑 Adult & ongoing vaccinations', adult);
 
-  // Historical context box
   html += `<div class="info-box" style="margin-top: 24px;">
     <strong>About this tool:</strong> The UK vaccination schedule has changed significantly since 1980. This tool shows what was in the <em>routine</em> programme at the time each vaccine would have been due for a ${sex} born on ${formatDate(dob)}. Major milestones include:
-    MMR replacing single vaccines (1988), accelerated infant schedule (1990), Hib added (1992), MR catch-up campaign (1994), MMR 2nd dose (1996), MenC (1999), 5-in-1 (2004), PCV (2006), HPV for girls (2008), rotavirus and childhood flu (2013), MenB (2015), 6-in-1 with HepB (2017), HPV for boys (2019), and MMRV replacing MMR (2026).
+    ${SCHEDULE_DATA.milestones}
   </div>`;
 
   // Share bar
@@ -1214,30 +1238,27 @@ function checkEligibility() {
   </div>`;
 
   html += '</div>';
-
   document.getElementById('results').innerHTML = html;
 
-  // Store current parameters for sharing
   window._lastCheck = {
     dob: `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`,
     sex: sex
   };
 
-  // Update URL with current parameters (without reloading) — safe fallback if sandboxed
   try {
     const params = new URLSearchParams();
     params.set('dob', window._lastCheck.dob);
     params.set('sex', sex);
     const newUrl = window.location.pathname + '?' + params.toString();
     history.replaceState(null, '', newUrl);
-  } catch(e) { /* sandboxed iframe — URL params not available, sharing still works via _lastCheck */ }
+  } catch(e) { /* sandboxed iframe */ }
 
-  // Scroll to results
   document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+
 // ============================================================
-// SHARING FUNCTIONS
+// SECTION 4: SHARING & URL PARAMS
 // ============================================================
 
 function showToast(message) {
@@ -1248,20 +1269,17 @@ function showToast(message) {
 }
 
 function buildShareUrl() {
-  // Build a shareable URL from current check parameters
-  // Uses the actual page URL if available, otherwise constructs one
   if (window._lastCheck) {
     let base;
     try {
-      // Try to use the real page URL (works when hosted, not in sandbox)
       const loc = new URL(window.location.href);
       if (loc.protocol === 'about:' || loc.hostname === 'www.claudeusercontent.com') {
-        base = '[YOUR-HOSTED-URL]/uk-vaccine-eligibility.html';
+        base = '[YOUR-HOSTED-URL]/index.html';
       } else {
         base = loc.origin + loc.pathname;
       }
     } catch(e) {
-      base = '[YOUR-HOSTED-URL]/uk-vaccine-eligibility.html';
+      base = '[YOUR-HOSTED-URL]/index.html';
     }
     return `${base}?dob=${window._lastCheck.dob}&sex=${window._lastCheck.sex}`;
   }
@@ -1303,15 +1321,12 @@ function fallbackCopy(text) {
   document.body.removeChild(ta);
 }
 
-function printResults() {
-  window.print();
-}
+function printResults() { window.print(); }
 
 function downloadText() {
   const results = document.getElementById('results');
   if (!results) return;
 
-  // Extract text content from results
   let text = 'UK VACCINATION ELIGIBILITY\n';
   text += '='.repeat(40) + '\n\n';
 
@@ -1355,10 +1370,6 @@ function downloadText() {
   showToast('Schedule downloaded');
 }
 
-// ============================================================
-// URL PARAMETER SUPPORT (for shared links)
-// ============================================================
-
 function loadFromUrl() {
   try {
     const params = new URLSearchParams(window.location.search);
@@ -1385,6 +1396,7 @@ document.addEventListener('keydown', function(e) {
 
 // Load from URL params on page load
 document.addEventListener('DOMContentLoaded', loadFromUrl);
+
 </script>
 
 </body>
