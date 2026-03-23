@@ -819,6 +819,43 @@ function getVaccineSchedule(dob, sex) {
     });
   }
 
+  // ============ MenC CATCH-UP CAMPAIGN (1999–2001) ============
+  // MenC conjugate vaccine introduced November 1999
+  // National catch-up: single dose offered to everyone under 18
+  // Schools: started with oldest year groups (Year 11+), worked down over ~18 months
+  // GP surgeries: for pre-school children
+  // Everyone in our 1980+ birth range was under 20 in Nov 1999, so all eligible
+  if (dob < dateFrom(1999, 11, 1)) {
+    // Approximate when the catch-up reached their age group
+    // Oldest students first (late 1999), youngest last (~2001)
+    const ageInNov99 = Math.floor((dateFrom(1999, 11, 1) - dob) / (365.25 * 24 * 60 * 60 * 1000));
+    let mencCatchupDate;
+    let mencAgeLabel;
+    if (ageInNov99 >= 11) {
+      // Secondary school (Year 7+): offered late 1999 to mid 2000
+      mencCatchupDate = dateFrom(2000, 1, 1);
+      mencAgeLabel = 'Late 1999 – early 2000 (schools MenC catch-up)';
+    } else if (ageInNov99 >= 5) {
+      // Primary school: offered mid to late 2000
+      mencCatchupDate = dateFrom(2000, 9, 1);
+      mencAgeLabel = '2000 (schools MenC catch-up)';
+    } else {
+      // Under school age: offered through GP
+      mencCatchupDate = dateFrom(2000, 6, 1);
+      mencAgeLabel = '2000 (GP MenC catch-up)';
+    }
+    vaccines.push({
+      ageLabel: mencAgeLabel,
+      dueDate: mencCatchupDate,
+      status: 'past',
+      items: [{
+        name: 'MenC (catch-up campaign)',
+        detail: 'Meningococcal C conjugate vaccine. When MenC was introduced in November 1999, a national catch-up campaign offered a single dose to everyone under 18.',
+        note: 'The schools-based catch-up started with the oldest year groups first and worked down over approximately 18 months. Those too young for school were vaccinated through their GP.'
+      }]
+    });
+  }
+
   // ============ BCG (school-based, universal until 2005) ============
   // Universal BCG for schoolchildren aged ~13 (Year 8/9) until 2005
   // From 2005: replaced by targeted neonatal programme for high-risk groups only
@@ -937,17 +974,11 @@ function getVaccineSchedule(dob, sex) {
     });
   }
 
-  // MenACWY from 2015; MenC teenage dose from 1999 catch-up (for those who didn't get infant MenC)
-  // Children born from Nov 1999 got infant MenC, so teenage MenC only for those born before that
+  // MenACWY from 2015 (MenC catch-up for pre-1999 births is handled in a separate section above)
   if (teenBoosterDate >= dateFrom(2015, 8, 1)) {
     teenItems.push({
       name: 'MenACWY',
-      detail: 'Protects against meningococcal groups A, C, W, and Y. Replaced the MenC teenage booster from 2015.'
-    });
-  } else if (teenBoosterDate >= dateFrom(1999, 11, 1) && dob < dateFrom(1999, 11, 1)) {
-    teenItems.push({
-      name: 'MenC',
-      detail: 'Meningococcal C conjugate vaccine (introduced 1999; replaced by MenACWY from 2015)'
+      detail: 'Protects against meningococcal groups A, C, W, and Y. Introduced for teenagers from 2015.'
     });
   }
 
